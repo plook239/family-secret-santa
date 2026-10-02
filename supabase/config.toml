@@ -1,0 +1,51 @@
+project_id = "family-secret-santa"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 17
+
+[studio]
+enabled = true
+port = 54323
+
+[auth]
+enabled = false
+
+# These endpoints use public requests or our own opaque admin session, not Auth JWTs.
+# Every privileged handler AND its database transaction enforce our admin session.
+[functions.public-event]
+verify_jwt = false
+[functions.register-participant]
+verify_jwt = false
+[functions.admin-login]
+verify_jwt = false
+[functions.admin-logout]
+verify_jwt = false
+[functions.admin-data]
+verify_jwt = false
+[functions.create-household]
+verify_jwt = false
+[functions.rename-household]
+verify_jwt = false
+[functions.delete-household]
+verify_jwt = false
+[functions.remove-participant]
+verify_jwt = false
+[functions.set-registration]
+verify_jwt = false
+[functions.generate-assignments]
+verify_jwt = false
+[functions.issue-reveal-token]
+verify_jwt = false
+[functions.reveal-assignment]
+verify_jwt = false
+[functions.reset-event]
+verify_jwt = false

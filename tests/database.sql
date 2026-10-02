@@ -1,0 +1,82 @@
+-- LOCAL TEST DATABASE ONLY. Everything is rolled back, including sample data.
+begin;
+do $$
+declare
+  v_session text := repeat('a',64); v_h1 uuid; v_h2 uuid;
+  v_p1 uuid; v_p2 uuid; v_p3 uuid; v_p4 uuid;
+  v_revision bigint; v_pairs jsonb; v_data jsonb; v_count integer;
+  v_table text; v_signature regprocedure;
+begin
+  foreach v_table in array array['santa_event','santa_households','santa_participants','santa_assignments','santa_reveal_tokens','santa_admin_sessions','santa_rate_limits'] loop
+    if not (select relrowsecurity from pg_class where oid = ('public.' || v_table)::regclass) then raise exception 'RLS missing on %', v_table; end if;
+    if has_table_privilege('anon', 'public.' || v_table, 'SELECT') or has_table_privilege('authenticated', 'public.' || v_table, 'SELECT') then raise exception 'Public SELECT grant on %', v_table; end if;
+  end loop;
+  for v_signature in select p.oid::regprocedure from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.proname like 'santa_%' loop
+    if has_function_privilege('anon', v_signature, 'EXECUTE') or has_function_privilege('authenticated', v_signature, 'EXECUTE') then raise exception 'Public RPC grant on %', v_signature; end if;
+  end loop;
+  -- Check actual browser-role requests, not just grant metadata.
+  set local role anon;
+  begin perform 1 from public.santa_participants; raise exception 'anon read participants'; exception when insufficient_privilege then null; end;
+  begin perform public.santa_public_event(); raise exception 'anon executed RPC'; exception when insufficient_privilege then null; end;
+  reset role;
+  set local role authenticated;
+  begin perform 1 from public.santa_assignments; raise exception 'authenticated read assignments'; exception when insufficient_privilege then null; end;
+  reset role;
+  begin perform public.santa_admin_data(v_session); raise exception 'Missing session accepted'; exception when sqlstate 'PT401' then null; end;
+  perform public.santa_start_session(v_session);
+  perform public.santa_admin_change(v_session, 'create-household', '{"name":"Maples"}');
+  perform public.santa_admin_change(v_session, 'create-household', '{"name":"Pines"}');
+  select id into v_h1 from public.santa_households where name = 'Maples';
+  select id into v_h2 from public.santa_households where name = 'Pines';
+  perform public.santa_register('Alice', 'alice@example.test', v_h1);
+  perform public.santa_register('Amy', 'amy@example.test', v_h1);
+  perform public.santa_register('Bob', 'bob@example.test', v_h2);
+  perform public.santa_register('Ben', 'ben@example.test', v_h2);
+  begin perform public.santa_register('Other', 'alice@example.test', v_h2); raise exception 'Duplicate email accepted'; exception when sqlstate 'PT409' then null; end;
+  begin perform public.santa_register('alice', 'other@example.test', v_h1); raise exception 'Duplicate household name accepted'; exception when sqlstate 'PT409' then null; end;
+  begin perform public.santa_register('Invalid', 'bad@example.test', gen_random_uuid()); raise exception 'Fake household accepted'; exception when sqlstate 'PT400' then null; end;
+  begin perform public.santa_admin_change(v_session, 'delete-household', jsonb_build_object('id',v_h1)); raise exception 'Nonempty household deleted'; exception when sqlstate 'PT409' then null; end;
+  v_data := public.santa_public_event();
+  if v_data ? 'participants' or v_data ? 'email' or v_data ? 'assignments' then raise exception 'Public summary leaks private data'; end if;
+  perform public.santa_admin_change(v_session, 'set-registration', '{"locked":true}');
+  begin perform public.santa_register('Blocked', 'blocked@example.test', v_h2); raise exception 'Lock bypassed'; exception when sqlstate 'PT409' then null; end;
+  select id into v_p1 from public.santa_participants where name = 'Alice';
+  select id into v_p2 from public.santa_participants where name = 'Amy';
+  select id into v_p3 from public.santa_participants where name = 'Bob';
+  select id into v_p4 from public.santa_participants where name = 'Ben';
+  select revision into v_revision from public.santa_event;
+  v_pairs := jsonb_build_array(jsonb_build_object('giverId',v_p1,'recipientId',v_p3),jsonb_build_object('giverId',v_p2,'recipientId',v_p4),jsonb_build_object('giverId',v_p3,'recipientId',v_p1),jsonb_build_object('giverId',v_p4,'recipientId',v_p2));
+  begin perform public.santa_commit_draw(v_session,v_revision-1,v_pairs); raise exception 'Stale revision accepted'; exception when sqlstate 'PT409' then null; end;
+  begin perform public.santa_commit_draw(v_session,v_revision,'[]'); raise exception 'Incomplete draw accepted'; exception when sqlstate 'PT400' then null; end;
+  begin perform public.santa_commit_draw(v_session,v_revision,jsonb_set(v_pairs,'{0,recipientId}',to_jsonb(v_p2))); raise exception 'Same household accepted'; exception when sqlstate 'PT400' then null; end;
+  begin perform public.santa_commit_draw(v_session,v_revision,jsonb_set(v_pairs,'{0,recipientId}',to_jsonb(v_p1))); raise exception 'Self match accepted'; exception when sqlstate 'PT400' then null; end;
+  begin perform public.santa_commit_draw(v_session,v_revision,jsonb_set(v_pairs,'{0,recipientId}',to_jsonb(v_p4))); raise exception 'Duplicate recipient accepted'; exception when unique_violation then null; end;
+  if exists(select 1 from public.santa_assignments) or (select drawn_at from public.santa_event) is not null then raise exception 'Failed draw saved partial state'; end if;
+  perform public.santa_commit_draw(v_session,v_revision,v_pairs);
+  select count(*) into v_count from public.santa_assignments;
+  if v_count <> 4 then raise exception 'Incomplete successful draw'; end if;
+  begin perform public.santa_commit_draw(v_session,v_revision,v_pairs); raise exception 'Repeated draw accepted'; exception when sqlstate 'PT409' then null; end;
+  begin perform public.santa_admin_change(v_session,'remove-participant',jsonb_build_object('id',v_p1)); raise exception 'Frozen event changed'; exception when sqlstate 'PT409' then null; end;
+  select revision into v_revision from public.santa_event;
+  perform public.santa_issue_token(v_session,v_p1,repeat('b',64),v_revision);
+  v_data := public.santa_reveal(repeat('b',64));
+  if v_data <> '{"participantName":"Alice","recipientName":"Bob"}'::jsonb then raise exception 'Reveal scope incorrect'; end if;
+  v_data := public.santa_admin_data(v_session);
+  if v_data ? 'assignments' or v_data ? 'tokens' or position(repeat('b',64) in v_data::text)>0 or position('recipientId' in v_data::text)>0 then raise exception 'Admin summary leaks pairing/token'; end if;
+  perform public.santa_issue_token(v_session,v_p1,repeat('c',64),v_revision);
+  begin perform public.santa_reveal(repeat('b',64)); raise exception 'Replaced token still valid'; exception when sqlstate 'PT404' then null; end;
+  begin perform public.santa_admin_change(v_session,'reset','{"confirmation":"wrong"}'); raise exception 'Weak reset accepted'; exception when sqlstate 'PT400' then null; end;
+  perform public.santa_admin_change(v_session,'reset','{"confirmation":"RESET EVENT"}');
+  begin perform public.santa_reveal(repeat('c',64)); raise exception 'Reset token still valid'; exception when sqlstate 'PT404' then null; end;
+  begin perform public.santa_issue_token(v_session,v_p1,repeat('d',64),v_revision); raise exception 'Stale token issue accepted'; exception when sqlstate 'PT409' then null; end;
+  if (select count(*) from public.santa_participants) <> 4 or (select registration_locked from public.santa_event) then raise exception 'Reset did not retain registrations/reopen'; end if;
+  perform public.santa_admin_change(v_session,'remove-participant',jsonb_build_object('id',v_p1));
+  if exists(select 1 from public.santa_participants where id=v_p1) then raise exception 'Removal failed'; end if;
+  if not public.santa_rate_limit('test',1,60) or public.santa_rate_limit('test',1,60) then raise exception 'Rate limiter failed'; end if;
+  perform public.santa_end_session(v_session);
+  begin perform public.santa_admin_data(v_session); raise exception 'Logged-out session accepted'; exception when sqlstate 'PT401' then null; end;
+  perform public.santa_start_session(v_session);
+  update public.santa_admin_sessions set expires_at = now()-interval '1 second' where token_hash=v_session;
+  begin perform public.santa_admin_data(v_session); raise exception 'Expired session accepted'; exception when sqlstate 'PT401' then null; end;
+end $$;
+rollback;

@@ -1,0 +1,127 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Local UI tests</title></head><body><pre id="output">RUNNING</pre><iframe id="app" title="App under test" style="width:375px;height:850px;border:0"></iframe><script type="module">
+import { createDemoService, STORAGE_KEY } from '../js/demo-service.js';
+const output = document.querySelector('#output'); const frame = document.querySelector('#app');
+const lines = []; const original = localStorage.getItem(STORAGE_KEY);
+const service = createDemoService(localStorage, crypto);
+const check = (condition, name) => { if (!condition) throw new Error(name); lines.push('PASS ' + name); output.textContent = lines.join('\n') + '\nRUNNING'; };
+const wait = async predicate => { for (let i = 0; i < 100; i++) { if (predicate()) return; await new Promise(r => setTimeout(r, 20)); } throw new Error('UI timed out'); };
+let navigation = 0;
+const page = async path => {
+  // Force a document load even when reopening an identical hash URL.
+  const url = new URL(path, location.href); url.searchParams.set('ui-test', String(++navigation)); url.searchParams.set('demo', '1');
+  await new Promise(resolve => { frame.onload = resolve; frame.src = url.href; }); return frame.contentDocument;
+};
+const submit = form => form.requestSubmit();
+try {
+  // Explicitly invoked local test only: sample fixture, restored in finally.
+  localStorage.removeItem(STORAGE_KEY);
+  let doc = await page('../admin.html'); await wait(() => !doc.querySelector('#open-reset').disabled);
+  check(doc.querySelector('#households').textContent.includes('Start by'), 'empty organizer state');
+  for (const name of ['Maple House', 'Pine House']) {
+    doc.querySelector('#household-name').value = name; submit(doc.querySelector('#household-form'));
+    await wait(() => doc.querySelector('#households').textContent.includes('Delete ' + name));
+  }
+  const households = (await service.getEvent()).households;
+  doc = await page('../index.html'); await wait(() => !doc.querySelector('#join-fields').disabled);
+  const register = async (name, email, household) => {
+    doc.querySelector('#name').value = name; doc.querySelector('#email').value = email; doc.querySelector('#household').value = household;
+    submit(doc.querySelector('#join-form'));
+  };
+  await register('Alice', 'alice@example.com', households[0].id); await wait(() => !doc.querySelector('#confirmation').hidden);
+  check(doc.querySelector('#confirmed-name').textContent === 'Alice', 'registration confirmation');
+  doc.querySelector('#another').click(); await wait(() => !doc.querySelector('#join-form').hidden);
+  await register('Alice', 'alice@example.com', households[0].id); await wait(() => doc.querySelector('#message').textContent.includes('already registered'));
+  check((await service.getEvent()).participants.length === 1, 'duplicate not saved');
+  await register('Bob', 'bob@example.com', households[1].id); await wait(() => !doc.querySelector('#confirmation').hidden);
+  check(doc.documentElement.scrollWidth <= 375, 'join page fits mobile width');
+  doc = await page('../admin.html'); await wait(() => doc.querySelector('#count').textContent === '2');
+  doc.querySelector('#lock').click(); await wait(() => !doc.querySelector('#generate').disabled);
+  doc.querySelector('#generate').click(); await wait(() => !doc.querySelector('#links-section').hidden);
+  check(doc.querySelector('#generate').disabled && doc.querySelector('#lock').disabled, 'successful draw freezes controls');
+  check(!doc.body.textContent.includes('giving to'), 'organizer never renders recipients');
+  check(doc.documentElement.scrollWidth <= 375, 'organizer fits mobile width');
+  doc.querySelector('#links-section').open = true;
+  check(doc.documentElement.scrollWidth <= 375, 'reveal link fields fit mobile width');
+  frame.style.width = '1000px'; await new Promise(r => setTimeout(r, 50));
+  check(doc.documentElement.scrollWidth <= 1000, 'organizer fits desktop width');
+  frame.style.width = '375px';
+  const links = await service.getRevealLinks(); doc = await page('../reveal.html#/reveal/' + links[0].token);
+  await wait(() => !doc.querySelector('#reveal-button').disabled);
+  check(doc.querySelector('#result').hidden && !doc.querySelector('#recipient').textContent, 'recipient absent before reveal');
+  doc.querySelector('#reveal-button').click(); await wait(() => !doc.querySelector('#result').hidden);
+  check(doc.querySelector('#giver').textContent === 'Alice' && doc.querySelector('#recipient').textContent === 'Bob', 'token reveals only matching participant and recipient');
+  check(doc.documentElement.scrollWidth <= 375, 'reveal fits mobile width');
+  doc.querySelector('#hide-result').click(); check(!doc.querySelector('#recipient').textContent, 'hide clears recipient from DOM');
+  doc = await page('../admin.html'); await wait(() => !doc.querySelector('#open-reset').disabled);
+  doc.querySelector('#open-reset').click(); check(doc.querySelector('#reset-dialog').open, 'reset requires confirmation dialog');
+  doc.querySelector('#reset-confirmation').value = 'RESET EVENT'; submit(doc.querySelector('#reset-form'));
+  await wait(() => doc.querySelector('#links-section').hidden && !doc.querySelector('#reset-dialog').open);
+  check(!(await service.getEvent()).drawn && (await service.getEvent()).participants.length === 2, 'reset clears draw and retains family');
+  doc = await page('../reveal.html#/reveal/' + links[0].token); await wait(() => !doc.querySelector('#reveal-button').disabled);
+  doc.querySelector('#reveal-button').click(); await wait(() => doc.querySelector('#message').textContent.includes('invalid or has expired'));
+  check(doc.querySelector('#result').hidden, 'expired token cannot reveal');
+
+  // Full user lifecycle with an impossible arrangement, removal, and refresh.
+  doc = await page('../index.html'); await wait(() => !doc.querySelector('#join-fields').disabled);
+  const longName = 'W'.repeat(80);
+  await register(longName, 'long@example.com', households[0].id); await wait(() => !doc.querySelector('#confirmation').hidden);
+  check(doc.documentElement.scrollWidth <= 375, 'long participant name fits mobile confirmation');
+  doc.querySelector('#another').click(); await wait(() => !doc.querySelector('#join-form').hidden);
+  await register('Temporary Guest', 'temporary@example.com', households[0].id); await wait(() => !doc.querySelector('#confirmation').hidden);
+  doc = await page('../admin.html'); await wait(() => doc.querySelector('#count').textContent === '4');
+  check(doc.documentElement.scrollWidth <= 375, 'long participant name fits mobile organizer');
+  frame.contentWindow.confirm = () => false;
+  [...doc.querySelectorAll('#participants button')].find(b => b.textContent === 'Remove Temporary Guest').click();
+  check((await service.getEvent()).participants.length === 4, 'canceling removal keeps participant');
+  frame.contentWindow.confirm = () => true;
+  [...doc.querySelectorAll('#participants button')].find(b => b.textContent === 'Remove Temporary Guest').click();
+  await wait(() => doc.querySelector('#count').textContent === '3');
+  check(!(await service.getEvent()).participants.some(p => p.name === 'Temporary Guest'), 'participant removal before generation');
+  doc.querySelector('#lock').click(); await wait(() => !doc.querySelector('#generate').disabled);
+  const beforeFailure = localStorage.getItem(STORAGE_KEY);
+  doc.querySelector('#generate').click(); await wait(() => doc.querySelector('#message').textContent.includes('impossible'));
+  check(localStorage.getItem(STORAGE_KEY) === beforeFailure && doc.querySelector('#links-section').hidden, 'impossible draw shows clean error and saves nothing');
+  check(!doc.querySelector('#generate').disabled, 'failed draw remains recoverable');
+  doc = await page('../index.html'); await wait(() => doc.querySelector('#join-status').textContent.includes('closed'));
+  check(doc.querySelector('#join-fields').disabled, 'registration lock disables join form');
+  try { await service.join({ name: 'Blocked', email: 'blocked@example.com', householdId: households[1].id }); throw new Error('Lock bypassed'); }
+  catch (error) { check(error.message.includes('closed'), 'service independently enforces registration lock'); }
+  doc = await page('../admin.html'); await wait(() => !doc.querySelector('#lock').disabled);
+  doc.querySelector('#lock').click(); await wait(() => doc.querySelector('#lock').textContent === 'Close registration');
+  doc = await page('../index.html'); await wait(() => !doc.querySelector('#join-fields').disabled);
+  await register('Erin', 'erin@example.com', households[1].id); await wait(() => !doc.querySelector('#confirmation').hidden);
+  doc = await page('../admin.html'); await wait(() => doc.querySelector('#count').textContent === '4');
+  doc.querySelector('#lock').click(); await wait(() => !doc.querySelector('#generate').disabled);
+  doc.querySelector('#generate').click(); doc.querySelector('#generate').click();
+  await wait(() => !doc.querySelector('#links-section').hidden);
+  const storedDraw = localStorage.getItem(STORAGE_KEY);
+  try { await service.generate(); throw new Error('Second generation allowed'); }
+  catch (error) { check(error.message.includes('draw is complete'), 'second generation rejected by service'); }
+  check(localStorage.getItem(STORAGE_KEY) === storedDraw, 'rapid clicks and second generation preserve original draw');
+  const participants = (await service.getEvent()).participants;
+  const newLinks = await service.getRevealLinks(); const recipients = [];
+  for (const link of newLinks) {
+    const result = await service.reveal(link.token);
+    check(Object.keys(result).length === 2 && result.participantName === link.name, 'token returns only its own two-name result: ' + link.name);
+    const giver = participants.find(p => p.name === result.participantName);
+    const recipient = participants.find(p => p.name === result.recipientName);
+    check(giver.id !== recipient.id && giver.householdId !== recipient.householdId, 'no self or same-household assignment: ' + link.name);
+    recipients.push(recipient.id);
+  }
+  check(new Set(newLinks.map(l => l.token)).size === participants.length, 'everyone gives exactly once with a unique token');
+  check(new Set(recipients).size === participants.length, 'everyone receives exactly once');
+  doc = await page('../admin.html'); await wait(() => !doc.querySelector('#links-section').hidden);
+  check(localStorage.getItem(STORAGE_KEY) === storedDraw && doc.querySelector('#count').textContent === '4' && doc.querySelector('#generate').disabled, 'refresh preserves participants, lock and assignments');
+  const longLink = newLinks.find(l => l.name === longName);
+  doc = await page('../reveal.html#/reveal/' + longLink.token); await wait(() => !doc.querySelector('#reveal-button').disabled);
+  doc.querySelector('#reveal-button').click(); await wait(() => !doc.querySelector('#result').hidden);
+  check(doc.documentElement.scrollWidth <= 375, 'long giver name fits mobile reveal');
+  const recipientBeforeRefresh = doc.querySelector('#recipient').textContent;
+  doc = await page('../reveal.html#/reveal/' + longLink.token); await wait(() => !doc.querySelector('#reveal-button').disabled);
+  check(doc.querySelector('#result').hidden && !doc.querySelector('#recipient').textContent, 'refresh hides secret without losing draw');
+  doc.querySelector('#reveal-button').click(); await wait(() => !doc.querySelector('#result').hidden);
+  check(doc.querySelector('#recipient').textContent === recipientBeforeRefresh, 'same reveal token remains valid after refresh');
+  output.textContent = lines.join('\n') + '\nALL UI TESTS PASSED';
+} catch (error) { output.textContent = lines.join('\n') + '\nFAIL ' + error.stack; }
+finally { if (original === null) localStorage.removeItem(STORAGE_KEY); else localStorage.setItem(STORAGE_KEY, original); }
+</script></body></html>

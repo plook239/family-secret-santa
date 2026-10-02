@@ -1,0 +1,81 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Production adapter integration tests</title></head><body><pre id="output">RUNNING</pre><iframe id="app" title="Production UI under test" style="width:375px;height:850px;border:0"></iframe><script type="module">
+// Test-only integration: real UI → real production adapter → real Edge handler →
+// real PostgreSQL (PGlite). No mock data service is shipped with production mode.
+import { PGlite } from '../.backend-test/node_modules/@electric-sql/pglite/dist/index.js';
+import { createHandler } from '../supabase/functions/_shared/handler.js';
+const output = document.querySelector('#output'); const frame = document.querySelector('#app'); const lines = [];
+const check = (condition, name) => { if (!condition) throw new Error(name); lines.push('PASS ' + name); output.textContent=lines.join('\n')+'\nRUNNING'; };
+const wait = async predicate => { for(let i=0;i<300;i++){ if(predicate())return; await new Promise(r=>setTimeout(r,20)); } throw new Error('UI timed out: '+lines.at(-1)); };
+const password = 'integration-test-only-password'; const env = name => ({ SUPABASE_URL:'https://test.supabase.co',SUPABASE_SERVICE_ROLE_KEY:'test-server-only',ADMIN_PASSWORD:password,ALLOWED_ORIGINS:location.origin })[name];
+const db = new PGlite();
+const configURL = 'data:text/javascript,' + encodeURIComponent("export const config = {mode:'supabase',supabaseUrl:'https://test.supabase.co',publicKey:'sb_publishable_test_only'};");
+window.testBackendFetch = async (url, init) => {
+  const rpcFetch = async (rpcURL, rpcInit) => {
+    const name=rpcURL.split('/').pop(); const params=JSON.parse(rpcInit.body); const keys=Object.keys(params);
+    if(!/^santa_[a-z_]+$/.test(name)||keys.some(k=>!/^p_[a-z_]+$/.test(k))) throw new Error('Unsafe test RPC');
+    try {
+      const values=keys.map(k=>typeof params[k]==='object'?JSON.stringify(params[k]):params[k]);
+      const result=await db.query(`select public.${name}(${keys.map((k,i)=>`${k} => $${i+1}`).join(',')}) as result`,values);
+      return Response.json(result.rows[0].result ?? null);
+    } catch(error) { return Response.json({code:error.code,message:error.message},{status:400}); }
+  };
+  const native=new Request('https://test.supabase.co/functions/v1/test',{method:'POST',body:init.body});
+  const request={method:'POST',headers:new Headers({Origin:location.origin,...init.headers}),body:native.body};
+  return createHandler(url.split('/').pop(),env,rpcFetch)(request);
+};
+async function page(path, hash='') {
+  let html=await(await fetch('../'+path)).text();
+  const setup=`<base href="${location.origin}/"><script type="importmap">${JSON.stringify({imports:{[location.origin+'/js/config.js']:configURL}})}<\/script><script>window.fetch=(...args)=>parent.testBackendFetch(...args);<\/script>`;
+  html=html.replace('<head>','<head>'+setup);
+  await new Promise(resolve=>{frame.onload=resolve;frame.srcdoc=html;});
+  if(hash)frame.contentWindow.location.hash=hash;
+  return frame.contentDocument;
+}
+try {
+  await db.waitReady; await db.exec('create role anon; create role authenticated; create role service_role bypassrls;');
+  await db.exec(await(await fetch('../supabase/migrations/20261002000100_secret_santa.sql')).text());
+  let doc=await page('admin.html'); await wait(()=>!doc.querySelector('#login-section').hidden);
+  check(doc.querySelector('#admin-content').hidden,'production organizer requires sign-in');
+  doc.querySelector('#admin-password').value='wrong';doc.querySelector('#login-form').requestSubmit();
+  await wait(()=>doc.querySelector('#message').textContent.includes('Incorrect'));
+  check(doc.querySelector('#admin-content').hidden,'wrong password cannot expose organizer data');
+  doc.querySelector('#admin-password').value=password;doc.querySelector('#login-form').requestSubmit();
+  await wait(()=>!doc.querySelector('#admin-content').hidden);
+  check(doc.querySelector('#admin-password').value==='','successful login clears password input');
+  for(const name of ['Maples','Pines']){doc.querySelector('#household-name').value=name;doc.querySelector('#household-form').requestSubmit();await wait(()=>doc.querySelector('#households').textContent.includes('Delete '+name));}
+  const houses=(await db.query('select id,name from public.santa_households order by name')).rows;
+  doc=await page('index.html');await wait(()=>!doc.querySelector('#join-fields').disabled);
+  for(const [i,name] of ['Alice','Bob'].entries()){
+    doc.querySelector('#name').value=name;doc.querySelector('#email').value=name.toLowerCase()+'@example.test';doc.querySelector('#household').value=houses[i].id;doc.querySelector('#join-form').requestSubmit();
+    await wait(()=>!doc.querySelector('#confirmation').hidden);
+    if(i===0){doc.querySelector('#another').click();await wait(()=>!doc.querySelector('#join-form').hidden);}
+  }
+  check((await db.query('select count(*)::int as count from public.santa_participants')).rows[0].count===2,'production registration saved to PostgreSQL');
+  doc=await page('admin.html');await wait(()=>doc.querySelector('#count').textContent==='2');
+  check(doc.querySelector('#login-section').hidden,'same-tab reload retains server session');
+  doc.querySelector('#lock').click();await wait(()=>!doc.querySelector('#generate').disabled);doc.querySelector('#generate').click();await wait(()=>!doc.querySelector('#links-section').hidden);
+  check(doc.querySelector('#generate').disabled,'production draw freezes Generate');
+  check([...doc.querySelectorAll('#reveal-links input')].every(input=>input.hidden&&!input.value),'delivery list contains no raw tokens before explicit issuance');
+  doc.querySelector('#links-section').open=true;
+  await wait(()=>doc.querySelectorAll('#reveal-links .item').length===2);
+  const row=[...doc.querySelectorAll('#reveal-links .item')].find(row=>row.querySelector('strong').textContent==='Alice');
+  row.querySelector('button').click();await wait(()=>!!row.querySelector('input').value);
+  const url=row.querySelector('input').value;const token=new URL(url).hash.slice('#/reveal/'.length);
+  const hashes=(await db.query('select token_hash from public.santa_reveal_tokens')).rows;
+  check(hashes.length===1&&hashes[0].token_hash!==token,'UI explicitly creates one hash-only reveal credential');
+  check(!doc.querySelector('#reveal-links').textContent.includes('recipient'),'organizer UI never contains pairings');
+  check(doc.documentElement.scrollWidth<=375,'production sign-in and delivery UI fit mobile');
+  doc=await page('reveal.html','#/reveal/'+token);await wait(()=>!doc.querySelector('#reveal-button').disabled);doc.querySelector('#reveal-button').click();await wait(()=>!doc.querySelector('#result').hidden);
+  check(doc.querySelector('#giver').textContent==='Alice'&&doc.querySelector('#recipient').textContent==='Bob','production UI reveals only token-associated names');
+  doc=await page('admin.html');await wait(()=>doc.querySelector('#count').textContent==='2');
+  check([...doc.querySelectorAll('#reveal-links input')].every(input=>!input.value),'refresh discards raw reveal link from organizer DOM');
+  doc.querySelector('#open-reset').click();doc.querySelector('#reset-confirmation').value='RESET EVENT';doc.querySelector('#reset-form').requestSubmit();await wait(()=>doc.querySelector('#links-section').hidden&&!doc.querySelector('#reset-dialog').open);
+  check((await db.query('select count(*)::int as count from public.santa_reveal_tokens')).rows[0].count===0,'production reset revokes reveal credentials');
+  doc.querySelector('#logout').click();await wait(()=>!doc.querySelector('#login-section').hidden);
+  check(doc.querySelector('#admin-content').hidden&&!doc.querySelector('#participants').children.length,'logout clears private organizer UI');
+  doc=await page('reveal.html','#/reveal/'+token);await wait(()=>!doc.querySelector('#reveal-button').disabled);doc.querySelector('#reveal-button').click();await wait(()=>doc.querySelector('#message').textContent.includes('expired'));
+  check(doc.querySelector('#result').hidden,'production expired link fails cleanly');
+  output.textContent=lines.join('\n')+'\nALL PRODUCTION UI TESTS PASSED';
+} catch(error){output.textContent=lines.join('\n')+'\nFAIL '+error.stack;}
+finally {await db.close();}
+</script></body></html>

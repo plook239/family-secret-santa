@@ -1,0 +1,87 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Backend security tests</title></head><body><pre id="output">RUNNING</pre><script type="module">
+import { createHandler } from '../supabase/functions/_shared/handler.js';
+import { hash, sessionHash } from '../supabase/functions/_shared/security.js';
+import { createSupabaseService } from '../js/supabase-service.js';
+const output = document.querySelector('#output'); const lines = [];
+function check(condition, name) { if (!condition) throw new Error(name); lines.push('PASS ' + name); output.textContent = lines.join('\n') + '\nRUNNING'; }
+const password = 'test-only-family-password-long'; const rawSession = 'a'.repeat(64);
+const env = name => ({ SUPABASE_URL: 'https://example.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'server-only', ADMIN_PASSWORD: password, ALLOWED_ORIGINS: location.origin })[name];
+const calls = []; let admin = false; let drawn = false; let limitAllowed = true; let commitError = null;
+const ids = ['11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222'];
+const mockRpc = async (url, init) => {
+  const name = url.split('/').pop(); const data = JSON.parse(init.body); calls.push({ name, data });
+  check(init.headers.apikey === 'server-only' && init.headers.Authorization === 'Bearer server-only', 'database credentials remain server-side: ' + name);
+  let result = null;
+  if (name === 'santa_rate_limit') result = limitAllowed;
+  if (name === 'santa_assert_admin' && !admin) return Response.json({ code: 'PT401', message: 'Admin sign-in required.' }, { status: 401 });
+  if (name === 'santa_admin_data') result = { drawn, locked: true, revision: 4, participants: ids.map((id,i) => ({ id, name: ['Alice','Bob'][i], email: `test${i}@example.test`, householdId: String(i) })) };
+  if (name === 'santa_commit_draw') { if (commitError) return Response.json(commitError, { status: 409 }); drawn = true; }
+  if (name === 'santa_public_event') result = { households: [], locked: false, drawn: false };
+  if (name === 'santa_reveal') result = { participantName: 'Alice', recipientName: 'Bob' };
+  return Response.json(result);
+};
+const request = (body = {}, headers = {}, method = 'POST') => {
+  // Browser Request construction strips forbidden Origin headers; model the server's
+  // incoming headers explicitly while retaining a native streamed request body.
+  const native = new Request('https://example.supabase.co/functions/v1/test', { method, ...(method === 'POST' ? { body: typeof body === 'string' ? body : JSON.stringify(body) } : {}) });
+  return { method, headers: new Headers({ Origin: location.origin, 'Content-Type':'application/json', ...headers }), body: native.body };
+};
+const invoke = (operation, body, headers) => createHandler(operation, env, mockRpc)(request(body, headers));
+try {
+  let response = await invoke('public-event'); check(response.ok && !(await response.json()).participants, 'public endpoint excludes participants/emails');
+  check(response.headers.get('Access-Control-Allow-Origin') === location.origin && response.headers.get('Cache-Control') === 'no-store', 'exact CORS origin and no-store response');
+  response = await createHandler('public-event', env, mockRpc)(request({}, { Origin:'https://evil.example' })); check(response.status === 403 && !response.headers.has('Access-Control-Allow-Origin'), 'unapproved origin rejected');
+  response = await createHandler('public-event', env, mockRpc)(request({}, {}, 'OPTIONS')); check(response.status === 204 && response.headers.get('Access-Control-Allow-Headers').includes('x-admin-session'), 'CORS preflight supports custom admin header');
+  response = await createHandler('public-event', env, mockRpc)(request({}, {}, 'GET')); check(response.status === 405, 'GET cannot mutate or reveal');
+  response = await invoke('public-event','{invalid'); check(response.status === 400, 'malformed JSON rejected');
+  response = await invoke('public-event',{ huge:'x'.repeat(9000) }); check(response.status === 413, 'oversized request rejected');
+  response = await invoke('create-household',{ name:'House', admin:true, password }); check(response.status === 401, 'browser admin claims and supplied password do not authorize mutations');
+  response = await invoke('admin-data',{}, {'X-Admin-Session':rawSession}); check(response.status === 401, 'unrecognized session rejected');
+  response = await invoke('admin-login',{password:'incorrect'}); check(response.status === 401, 'incorrect password rejected');
+  limitAllowed = false; response = await invoke('admin-login',{password}); check(response.status === 429, 'database-backed login throttle enforced'); limitAllowed = true;
+  response = await invoke('admin-login',{password}); const login = await response.json();
+  check(response.ok && /^[a-f0-9]{64}$/.test(login.sessionToken) && !JSON.stringify(login).includes(password), 'login returns random expiring session, never password');
+  const sessionCall = calls.findLast(c => c.name === 'santa_start_session'); check(sessionCall.data.p_session_hash !== login.sessionToken && sessionCall.data.p_session_hash === await sessionHash(login.sessionToken,password), 'session stored as keyed hash');
+  check(await sessionHash(login.sessionToken,password) !== await sessionHash(login.sessionToken,'different-secret-password'), 'password rotation invalidates sessions');
+  admin = true;
+  response = await invoke('set-registration',{locked:'false'}, {'X-Admin-Session':rawSession}); check(response.status === 400, 'invalid lock type rejected');
+  response = await invoke('remove-participant',{id:'fake'}, {'X-Admin-Session':rawSession}); check(response.status === 400, 'invalid participant ID rejected');
+  response = await invoke('register-participant',{name:'A',email:'bad',householdId:ids[0]}); check(response.status === 400, 'invalid registration rejected');
+  response = await invoke('reset-event',{confirmation:'RESET'}, {'X-Admin-Session':rawSession}); check(response.status === 400, 'exact reset confirmation enforced');
+  commitError = { code:'PT409', message:'The family list changed. Nothing was saved.' };
+  response = await invoke('generate-assignments',{}, {'X-Admin-Session':rawSession}); check(response.status === 409 && !drawn, 'stale database snapshot fails cleanly'); commitError = null;
+  response = await invoke('generate-assignments',{}, {'X-Admin-Session':rawSession}); const generated = await response.json();
+  check(response.ok && Object.keys(generated).join() === 'ok', 'generation returns no assignments or tokens');
+  const drawCall = calls.findLast(c => c.name === 'santa_commit_draw'); check(drawCall.data.p_revision === 4 && drawCall.data.p_pairs.length === 2, 'tested algorithm submits complete revision-checked matching');
+  response = await invoke('generate-assignments',{}, {'X-Admin-Session':rawSession}); check(response.status === 409, 'repeat generation refused');
+  response = await invoke('issue-reveal-token',{participantId:ids[0]}, {'X-Admin-Session':rawSession}); const issued = await response.json();
+  const issuedCall = calls.findLast(c => c.name === 'santa_issue_token');
+  check(Object.keys(issued).join() === 'token' && issuedCall.data.p_participant_id === ids[0] && issuedCall.data.p_token_hash === await hash(issued.token) && issuedCall.data.p_token_hash !== issued.token, 'single explicit token returned once; only SHA-256 stored');
+  response = await invoke('issue-reveal-token',{participantId:ids[0],participantIds:ids}, {'X-Admin-Session':rawSession}); check(Object.keys(await response.json()).join() === 'token', 'supplied batch IDs cannot request all tokens');
+  response = await invoke('reveal-assignment',{token:issued.token}); const revealed = await response.json(); check(Object.keys(revealed).length === 2 && revealed.participantName === 'Alice' && revealed.recipientName === 'Bob', 'reveal response contains only two scoped names');
+  check(calls.findLast(c => c.name === 'santa_reveal').data.p_token_hash === await hash(issued.token), 'reveal looks up hash, not raw token');
+  const store = new Map(); const sessionStore = { getItem:key => store.get(key)??null, setItem:(key,value)=>store.set(key,value), removeItem:key=>store.delete(key) };
+  const frontendCalls = [];
+  const browserFetch = async (url, init) => { frontendCalls.push({url,init}); const op = url.split('/').pop(); return createHandler(op,env,mockRpc)(request(init.body,init.headers)); };
+  const service = createSupabaseService({supabaseUrl:'https://example.supabase.co',publicKey:'sb_publishable_safe-public'}, {fetchApi:browserFetch,sessionStore});
+  await service.login(password); await service.getAdminEvent();
+  check(service.isAuthenticated() && frontendCalls[1].init.headers['X-Admin-Session'], 'frontend uses sessionStorage and custom session header');
+  const links = await service.getRevealLinks(); check(links.every(l => !('token' in l)) && links.length === 2, 'frontend delivery list contains metadata only');
+  check(frontendCalls.every(c => c.init.credentials === 'omit' && c.init.cache === 'no-store' && c.init.headers.apikey === 'sb_publishable_safe-public'), 'frontend sends only safe public key and no cross-origin cookies');
+  admin = false;
+  try { await service.getAdminEvent(); } catch { /* Expected. */ }
+  check(!service.isAuthenticated(), 'expired or revoked session cleared by frontend');
+  // Optional real Postgres execution. Install PGlite in ignored .backend-test first.
+  if (new URLSearchParams(location.search).has('database')) {
+    const { PGlite } = await import('../.backend-test/node_modules/@electric-sql/pglite/dist/index.js');
+    const db = new PGlite(); await db.waitReady;
+    await db.exec('create role anon; create role authenticated; create role service_role bypassrls;');
+    const migration = await (await fetch('../supabase/migrations/20261002000100_secret_santa.sql')).text();
+    await db.exec(migration); check(true,'migration executes on real PostgreSQL');
+    const sql = await (await fetch('./database.sql')).text(); await db.exec(sql);
+    check(true,'database integration: grants, RLS, sessions, constraints, atomic draw, reset, token scope and revocation');
+    await db.close();
+  }
+  output.textContent = lines.join('\n') + '\nALL BACKEND TESTS PASSED';
+} catch (error) { output.textContent = lines.join('\n') + '\nFAIL ' + error.stack; }
+</script></body></html>
