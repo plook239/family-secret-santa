@@ -80,6 +80,8 @@ try {
     const migration = await (await fetch('../supabase/migrations/20261002000100_secret_santa.sql')).text();
     await db.exec(migration); check(true,'migration executes on real PostgreSQL');
     await db.exec(await (await fetch('../supabase/migrations/20261002000200_email_delivery.sql')).text());
+    await db.exec(await (await fetch('../supabase/migrations/20261002000300_explicit_atomic_reset.sql')).text());
+    await db.exec(await (await fetch('../supabase/migrations/20261002000400_delete_event_data.sql')).text());
     const sql = await (await fetch('./database.sql')).text(); await db.exec(sql);
     check(true,'database integration: grants, RLS, sessions, constraints, atomic draw, reset, token scope and revocation');
     await db.close();

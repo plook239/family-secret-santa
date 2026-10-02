@@ -17,6 +17,11 @@ export function createHandler(operation, env, fetchApi = fetch, emailOptions = {
     const data = await response.json().catch(() => null);
     if (!response.ok) {
       if (data?.code?.match(/^PT(400|401|404|409|429)$/)) throw new ApiError(data.message, Number(data.code.slice(2)));
+      if ((name === 'santa_admin_change' && parameters.p_action === 'reset') || ['santa_reset_draw','santa_delete_event_data'].includes(name)) {
+        // Diagnostic metadata only: never log SQL text, provider details or private rows.
+        const code = typeof data?.code === 'string' && /^[A-Z0-9]{5}$/.test(data.code) ? data.code : 'unknown';
+        console.error(`Secret Santa reset database failure (code ${code}).`);
+      }
       // Never return raw Postgres errors, SQL, constraint details, or private data.
       throw new ApiError('The request could not be completed. Refresh and try again.', 500);
     }
@@ -72,6 +77,16 @@ export function createHandler(operation, env, fetchApi = fetch, emailOptions = {
         }
         case 'admin-logout': await rpc('santa_end_session', { p_session_hash: adminHash }); return response({ ok: true });
         case 'admin-data': return response(await rpc('santa_admin_data', { p_session_hash: adminHash }));
+        case 'reset-event': {
+          if (body.confirmation !== 'RESET DRAW') throw new ApiError('Type RESET DRAW exactly to confirm.');
+          await rpc('santa_reset_draw', { p_session_hash:adminHash, p_confirmation:body.confirmation });
+          return response({ ok:true });
+        }
+        case 'delete-event-data': {
+          if (body.confirmation !== 'DELETE EVERYTHING') throw new ApiError('Type DELETE EVERYTHING exactly to confirm.');
+          await rpc('santa_delete_event_data', { p_session_hash:adminHash, p_confirmation:body.confirmation });
+          return response({ ok:true });
+        }
         case 'generate-assignments': {
           const event = await rpc('santa_admin_data', { p_session_hash: adminHash });
           if (event.drawn) throw new ApiError('The draw is already complete. Reset is required to draw again.', 409);
@@ -115,7 +130,6 @@ export function createHandler(operation, env, fetchApi = fetch, emailOptions = {
             case 'rename-household': data = { id: uuid(body.id), name: text(body.name, 60, 'Household name') }; break;
             case 'delete-household': case 'remove-participant': data = { id: uuid(body.id) }; break;
             case 'set-registration': if (typeof body.locked !== 'boolean') throw new ApiError('A lock setting is required.'); data = { locked: body.locked }; break;
-            case 'reset-event': if (body.confirmation !== 'RESET EVENT') throw new ApiError('Type RESET EVENT exactly to confirm.'); data = { confirmation: body.confirmation }; break;
             default: throw new ApiError('Unknown endpoint.', 404);
           }
           await rpc('santa_admin_change', { p_session_hash: adminHash, p_action: operation === 'reset-event' ? 'reset' : operation, p_data: data });

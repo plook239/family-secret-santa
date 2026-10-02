@@ -68,7 +68,7 @@ await test('failed draws save nothing; successful draws freeze event and reset r
   for (const link of links) { assert.match(link.token, /^[a-f0-9]{64}$/); const reveal = await s.reveal(link.token); assert.deepStrictEqual(Object.keys(reveal).sort(), ['participantName', 'recipientName']); assert.strictEqual(reveal.participantName, link.name); }
   await assert.rejects(s.reveal('invalid')); await assert.rejects(s.generate()); await assert.rejects(s.setLocked(false));
   await assert.rejects(s.saveHousehold({ name: 'C' })); await assert.rejects(s.removeParticipant(event.participants[0].id));
-  await assert.rejects(s.reset('RESET')); await s.reset('RESET EVENT');
+  await assert.rejects(s.reset('RESET')); await s.reset('RESET DRAW');
   await assert.rejects(s.reveal(links[0].token)); assert.strictEqual((await s.getEvent()).participants.length, 4); assert.strictEqual((await s.getEvent()).locked, false);
 });
 await test('corrupt storage and failed writes report errors without overwriting data', async () => {
@@ -83,5 +83,19 @@ await test('secure randomness required; token collision cannot partially save a 
   await s.setLocked(true); const before = data.get(STORAGE_KEY);
   const collisionService = createDemoService(storage, { getRandomValues: bytes => bytes.fill(1) });
   await assert.rejects(collisionService.generate()); assert.strictEqual(data.get(STORAGE_KEY), before);
+});
+await test('demo reset draw keeps family, permits redraw; full deletion needs exact confirmation and clears family', async () => {
+  const { service:s, data }=fixture();
+  for(const name of ['A','B']) await s.saveHousehold({name});
+  const houses=(await s.getEvent()).households;
+  for(let i=0;i<2;i++) await s.join({name:`Person ${i}`,email:`p${i}@test.com`,householdId:houses[i].id});
+  await s.setLocked(true); await s.generate(); const token=(await s.getRevealLinks())[0].token;
+  await assert.rejects(s.reset('RESET EVENT')); await s.reset('RESET DRAW');
+  assert.strictEqual((await s.getEvent()).participants.length,2); assert.strictEqual((await s.getEvent()).households.length,2);
+  await s.setLocked(true); await s.generate(); const before=data.get(STORAGE_KEY);
+  await assert.rejects(s.deleteAllEventData('DELETE ALL EVENT DATA')); assert.strictEqual(data.get(STORAGE_KEY),before);
+  await s.deleteAllEventData('DELETE EVERYTHING'); const event=await s.getEvent();
+  assert.strictEqual(event.participants.length,0); assert.strictEqual(event.households.length,0); assert.strictEqual(event.locked,false); assert.strictEqual(event.drawn,false);
+  await assert.rejects(s.reveal(token)); await s.saveHousehold({name:'New family'});
 });
 console.log(`\n${passed} test groups passed.`);

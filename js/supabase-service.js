@@ -62,6 +62,7 @@ export function createSupabaseService(config, { fetchApi = fetch, sessionStore =
     generate: () => call('generate-assignments', {}, true),
     retryFailedEmails: () => call('retry-failed-emails', {}, true),
     reset: confirmation => call('reset-event', { confirmation }, true),
+    deleteAllEventData: confirmation => call('delete-event-data', { confirmation }, true),
     reveal: token => call('reveal-assignment', { token }),
     async getRevealLinks() {
       const event = await call('admin-data', {}, true);

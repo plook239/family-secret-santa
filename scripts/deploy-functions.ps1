@@ -8,7 +8,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $santaProjectRoot 'node_modules/.bin
 $santaFunctionNames = @(
   'public-event', 'register-participant', 'admin-login', 'admin-logout', 'admin-data',
   'create-household', 'rename-household', 'delete-household', 'remove-participant',
-  'set-registration', 'generate-assignments', 'retry-failed-emails', 'issue-reveal-token', 'reveal-assignment', 'reset-event'
+  'set-registration', 'generate-assignments', 'retry-failed-emails', 'issue-reveal-token', 'reveal-assignment', 'reset-event', 'delete-event-data'
 )
 Push-Location -LiteralPath $santaProjectRoot
 try {

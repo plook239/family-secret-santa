@@ -42,6 +42,8 @@ try {
   await db.waitReady; await db.exec('create role anon; create role authenticated; create role service_role bypassrls;');
   await db.exec(await(await fetch('../supabase/migrations/20261002000100_secret_santa.sql')).text());
   await db.exec(await(await fetch('../supabase/migrations/20261002000200_email_delivery.sql')).text());
+  await db.exec(await(await fetch('../supabase/migrations/20261002000300_explicit_atomic_reset.sql')).text());
+  await db.exec(await(await fetch('../supabase/migrations/20261002000400_delete_event_data.sql')).text());
   let doc=await page('admin.html'); await wait(()=>!doc.querySelector('#login-section').hidden);
   check(doc.querySelector('#admin-content').hidden,'production organizer requires sign-in');
   doc.querySelector('#admin-password').value='wrong';doc.querySelector('#login-form').requestSubmit();
@@ -84,8 +86,15 @@ try {
   check(doc.querySelector('#giver').textContent==='Alice'&&doc.querySelector('#recipient').textContent==='Bob','production UI reveals only token-associated names');
   doc=await page('admin.html');await wait(()=>doc.querySelector('#count').textContent==='2');
   check([...doc.querySelectorAll('#reveal-links input')].every(input=>!input.value),'refresh discards raw reveal link from organizer DOM');
-  doc.querySelector('#open-reset').click();doc.querySelector('#reset-confirmation').value='RESET EVENT';doc.querySelector('#reset-form').requestSubmit();await wait(()=>doc.querySelector('#links-section').hidden&&!doc.querySelector('#reset-dialog').open);
+  doc.querySelector('#open-reset').click();doc.querySelector('#reset-confirmation').value='RESET DRAW';doc.querySelector('#reset-confirmation').dispatchEvent(new Event('input'));doc.querySelector('#reset-form').requestSubmit();await wait(()=>doc.querySelector('#links-section').hidden&&!doc.querySelector('#reset-dialog').open);
   check((await db.query('select count(*)::int as count from public.santa_reveal_tokens')).rows[0].count===0,'production reset revokes reveal credentials');
+  check(doc.querySelector('#count').textContent==='2'&&doc.querySelector('#households').children.length===2,'Reset draw keeps households and entrants');
+  doc.querySelector('#delete-all-options').open=true;doc.querySelector('#open-delete-all').click();
+  check(doc.querySelector('#confirm-delete-all').disabled,'Full deletion requires typed confirmation');
+  doc.querySelector('#delete-all-confirmation').value='DELETE EVERYTHING';doc.querySelector('#delete-all-confirmation').dispatchEvent(new Event('input'));
+  doc.querySelector('#delete-all-form').requestSubmit();await wait(()=>!doc.querySelector('#delete-all-dialog').open&&doc.querySelector('#count').textContent==='0');
+  check((await db.query('select count(*)::int as count from public.santa_households')).rows[0].count===0,'Full deletion UI removes households and entrants');
+  check(doc.querySelector('#lock').textContent==='Close registration'&&doc.documentElement.scrollWidth<=375,'Full deletion reopens registration and mobile layout fits');
   doc.querySelector('#logout').click();await wait(()=>!doc.querySelector('#login-section').hidden);
   check(doc.querySelector('#admin-content').hidden&&!doc.querySelector('#participants').children.length,'logout clears private organizer UI');
   doc=await page('reveal.html','#/reveal/'+token);await wait(()=>!doc.querySelector('#reveal-button').disabled);doc.querySelector('#reveal-button').click();await wait(()=>doc.querySelector('#message').textContent.includes('expired'));

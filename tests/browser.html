@@ -4,7 +4,7 @@ const output = document.querySelector('#output'); const frame = document.querySe
 const lines = []; const original = localStorage.getItem(STORAGE_KEY);
 const service = createDemoService(localStorage, crypto);
 const check = (condition, name) => { if (!condition) throw new Error(name); lines.push('PASS ' + name); output.textContent = lines.join('\n') + '\nRUNNING'; };
-const wait = async predicate => { for (let i = 0; i < 100; i++) { if (predicate()) return; await new Promise(r => setTimeout(r, 20)); } throw new Error('UI timed out'); };
+const wait = async predicate => { for (let i = 0; i < 100; i++) { if (predicate()) return; await new Promise(r => setTimeout(r, 20)); } throw new Error('UI timed out: ' + (frame.contentDocument?.querySelector('#message')?.textContent ?? '')); };
 let navigation = 0;
 const page = async path => {
   // Force a document load even when reopening an identical hash URL.
@@ -54,7 +54,8 @@ try {
   doc.querySelector('#hide-result').click(); check(!doc.querySelector('#recipient').textContent, 'hide clears recipient from DOM');
   doc = await page('../admin.html'); await wait(() => !doc.querySelector('#open-reset').disabled);
   doc.querySelector('#open-reset').click(); check(doc.querySelector('#reset-dialog').open, 'reset requires confirmation dialog');
-  doc.querySelector('#reset-confirmation').value = 'RESET EVENT'; submit(doc.querySelector('#reset-form'));
+  check(doc.querySelector('#confirm-reset').disabled, 'draw reset requires exact typed confirmation');
+  doc.querySelector('#reset-confirmation').value = 'RESET DRAW'; doc.querySelector('#reset-confirmation').dispatchEvent(new Event('input')); submit(doc.querySelector('#reset-form'));
   await wait(() => doc.querySelector('#links-section').hidden && !doc.querySelector('#reset-dialog').open);
   check(!(await service.getEvent()).drawn && (await service.getEvent()).participants.length === 2, 'reset clears draw and retains family');
   doc = await page('../reveal.html#/reveal/' + links[0].token); await wait(() => !doc.querySelector('#reveal-button').disabled);

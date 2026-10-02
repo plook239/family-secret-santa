@@ -77,8 +77,12 @@ export function createDemoService(storage, cryptoApi) {
       return { participantName: state.participants.find(p => p.id === assignment.giverId).name, recipientName: state.participants.find(p => p.id === assignment.recipientId).name };
     },
     async reset(confirmation) {
-      if (confirmation !== 'RESET EVENT') throw new Error('Type RESET EVENT exactly to confirm.');
+      if (confirmation !== 'RESET DRAW') throw new Error('Type RESET DRAW exactly to confirm.');
       const state = read(); state.draw = null; state.locked = false; write(state);
+    },
+    async deleteAllEventData(confirmation) {
+      if (confirmation !== 'DELETE EVERYTHING') throw new Error('Type DELETE EVERYTHING exactly to confirm.');
+      write(initial());
     }
   };
 }

@@ -95,7 +95,7 @@ Replace the username. Add a custom HTTPS domain if applicable. The repository pa
 .\scripts\deploy-functions.ps1
 ```
 
-This deploys all 15 functions, stopping on failure. The API bundler (`--use-api`) avoids requiring Docker for hosted deployment. `verify_jwt = false` is deliberate: this app uses public endpoints and custom password-based sessions, not Supabase Auth users. Privileged handlers and SQL transactions both validate the admin session. The public key is not admin authorization. See [function authentication](https://supabase.com/docs/guides/functions/auth).
+This deploys all 16 functions, stopping on failure. The API bundler (`--use-api`) avoids requiring Docker for hosted deployment. `verify_jwt = false` is deliberate: this app uses public endpoints and custom password-based sessions, not Supabase Auth users. Privileged handlers and SQL transactions both validate the admin session. The public key is not admin authorization. See [function authentication](https://supabase.com/docs/guides/functions/auth).
 
 Redeploy one changed function with, for example:
 
@@ -263,7 +263,8 @@ docs/SECURITY.md                        Security review and limits
 | `retry-failed-emails` | Admin session | Retry unsent invitations; never redraw or resend recorded successes |
 | `issue-reveal-token` | Admin session | One participant's link, returned once |
 | `reveal-assignment` | Reveal token, throttled | Only giver/recipient names |
-| `reset-event` | Admin + exact confirmation | Clear draw/tokens, reopen |
+| `reset-event` | Admin + `RESET DRAW` | Clear draw/tokens/email state, keep family, reopen |
+| `delete-event-data` | Admin + `DELETE EVERYTHING` | Clear draw, emails, participants and households; restore fresh open event |
 
 Endpoints use JSON POST and CORS OPTIONS. Browser code never queries tables. Every state mutation acquires the event row lock and increments its revision. Generation computes a complete matching from a server snapshot; its commit rechecks revision, lock and membership and atomically inserts all assignments/marks completion. Database constraints enforce one giver/recipient. Stale/invalid draws save nothing; repeat generation is blocked in both layers.
 
@@ -301,7 +302,7 @@ Start-Process 'http://127.0.0.1:8000/tests/production-ui.html'
 
 The production UI harness exercises UI → production adapter → Edge handler → PostgreSQL in memory, including sign-in, link issuance, reveal, reset and logout. Test pages never connect to your hosted database. PGlite is not an application dependency. `tests/database.sql` also runs against local Supabase Postgres and rolls sample data back; use only a disposable/local test database.
 
-Automated checks include the original seven algorithm/demo groups, 40 demo UI checks, Edge/security/adapter and PostgreSQL checks, native Deno tests, production organizer/email UI integration, and Pages subpath tests. All 15 Edge entrypoints pass Deno checking. Tests use local PostgreSQL and mocked Resend, never your hosted project. Real Resend delivery still requires the configuration and smoke test below; no remote deployment or real email was performed during implementation.
+Automated checks include the original seven algorithm/demo groups, 40 demo UI checks, Edge/security/adapter and PostgreSQL checks, native Deno tests, production organizer/email UI integration, and Pages subpath tests. All 16 Edge entrypoints pass Deno checking. Tests use local PostgreSQL and mocked Resend, never your hosted project. Real Resend delivery still requires the configuration and smoke test below; no remote deployment or real email was performed during implementation.
 
 If Deno is installed, run the six native Edge HTTP/crypto tests without any network or extra dependencies:
 
@@ -314,6 +315,44 @@ deno test .\tests\edge.test.js
 Read [the security review](docs/SECURITY.md). Configure manually: account/project/reference/database password, organizer password secret, allowed origins, frontend URL/public key, GitHub Pages settings, and the Resend secrets below.
 
 ## Add Resend to the live app
+
+### Two organizer cleanup actions
+
+| Action | Required confirmation | Result |
+| --- | --- | --- |
+| **Reset draw** | `RESET DRAW` | Clear assignments, reveal credentials and email delivery state; keep all households and registered names/emails; reopen registration |
+| **Delete all event data** | `DELETE EVERYTHING` | Also permanently remove every participant and household; restore an empty, open event with fresh timestamps |
+
+Both actions are organizer-authenticated, atomic, and blocked while an email send lease is active. A failed operation restores every affected table. The full deletion button is behind an expandable warning; its red confirmation button stays disabled until the exact phrase is entered. Neither cleanup calls Resend or regenerates a draw. Supabase configuration/secrets, organizer authentication and security rate limits remain in place. The internal event revision continues increasing to reject stale generation snapshots.
+
+`20261002000400_delete_event_data.sql` adds the two private cleanup RPCs without altering existing family data. The `reset-event` Edge Function now accepts `RESET DRAW`; the new `delete-event-data` endpoint requires `DELETE EVERYTHING`. Apply all pending migrations (including the safe-delete correction), then deploy the functions before publishing the updated frontend:
+
+```powershell
+Set-Location -LiteralPath 'C:\Users\Peter\Desktop\Secret Santa\family-secret-santa'
+npx supabase db push
+powershell -ExecutionPolicy Bypass -File .\scripts\deploy-functions.ps1
+git add .
+git diff --cached
+git commit -m "Add separate reset draw and delete all event data actions"
+git push origin main
+Start-Process 'https://github.com/plook239/family-secret-santa/actions'
+```
+
+Review the staged diff before committing. In GitHub, select **Publish frontend to GitHub Pages → Run workflow → main → Run workflow**. Deployment installs the actions; it does not invoke either one. Existing Supabase secrets and public frontend config need no changes. The Pages workflow remains manual-only.
+
+### Fix reset errors on an already-deployed email-enabled project
+
+If reset fails with PostgreSQL `21000: DELETE requires a WHERE clause`, the original reset branch in `20261002000100_secret_santa.sql` used unrestricted deletes on `santa_reveal_tokens` and `santa_assignments`. The Edge Function calls that SQL routine; it does not issue a table DELETE itself. Production safe-delete protection rejects these statements. The additive `20261002000300_explicit_atomic_reset.sql` migration replaces the routine with explicit singleton-event/revision and assignment-membership WHERE conditions, clears the outbox/tokens before assignments, and preserves the active-email lease guard. Historical migrations remain unchanged.
+
+From your already-linked repository, run:
+
+```powershell
+Set-Location -LiteralPath 'C:\Users\Peter\Desktop\Secret Santa\family-secret-santa'
+npx supabase db push
+npx supabase functions deploy reset-event --no-verify-jwt --use-api
+```
+
+The migration changes the routine only; deploying it does **not** reset your existing event or regenerate anything. The Edge redeployment adds safe SQLSTATE-only diagnostics. No new secrets or GitHub Pages deployment are needed. After deployment, refresh the organizer page and reset explicitly when ready. If an email is actively sending, wait 90 seconds and try again. A successful reset clears assignments, all reveal credentials and delivery/outbox state, preserves participants/households, and reopens registration. Any SQL error rolls the whole reset back.
 
 ### 1. Configure Resend and a sending domain
 
@@ -360,7 +399,7 @@ Keep the existing `ADMIN_PASSWORD` unchanged while queued emails may need retrie
 powershell -ExecutionPolicy Bypass -File .\scripts\deploy-functions.ps1
 ```
 
-This deploys all 15 endpoints, including **retry-failed-emails**, and updates every function that imports the shared handler. It does not deploy GitHub Pages. Deploy the migration first; new handlers depend on the new SQL routines. No Resend key is needed in GitHub Actions.
+This deploys all 16 endpoints, including **retry-failed-emails**, and updates every function that imports the shared handler. It does not deploy GitHub Pages. Deploy the migration first; new handlers depend on the new SQL routines. No Resend key is needed in GitHub Actions.
 
 ### 4. Check the UI locally, then publish the frontend
 

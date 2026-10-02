@@ -38,7 +38,8 @@ async function refresh() {
   }
   $('#lock').textContent = event.locked ? 'Reopen registration' : 'Close registration'; $('#lock').disabled = event.drawn;
   $('#generate').disabled = event.drawn || !event.locked || event.participants.length < 2;
-  $('#open-reset').disabled = false;
+  $('#open-reset').disabled = emailBusy;
+  $('#open-delete-all').disabled = emailBusy;
   $('#draw-status').textContent = event.drawn ? 'Names drawn successfully. Everyone has one recipient from another household. The event is frozen; pairings stay hidden here.' : event.locked ? 'Registration is closed. Review your family list, then draw the names.' : 'Registration is open. Finish gathering the family, then close registration to draw.';
   $('#email-section').hidden = service.isDemo || !event.drawn;
   const delivery = event.emailDelivery ?? {};
@@ -119,16 +120,28 @@ $('#retry-emails').addEventListener('click', () => action(async () => {
   finally { emailBusy = false; await refresh(); }
 }));
 $('#refresh-emails').addEventListener('click', () => action(refresh));
-$('#open-reset').addEventListener('click', () => { $('#reset-form').reset(); $('#reset-dialog').showModal(); $('#reset-confirmation').focus(); });
+$('#open-reset').addEventListener('click', () => { $('#reset-form').reset(); $('#confirm-reset').disabled = true; $('#reset-dialog').showModal(); $('#reset-confirmation').focus(); });
+$('#reset-confirmation').addEventListener('input', e => { $('#confirm-reset').disabled = e.target.value !== 'RESET DRAW'; });
 $('#cancel-reset').addEventListener('click', () => $('#reset-dialog').close());
 $('#reset-form').addEventListener('submit', e => { e.preventDefault(); action(async () => {
-  await service.reset($('#reset-confirmation').value); $('#reset-dialog').close(); await refresh(); message('Draw cleared, old links invalidated, and registration reopened.');
+  const submit = $('#confirm-reset'); submit.disabled = true;
+  try { await service.reset($('#reset-confirmation').value); $('#reset-dialog').close(); await refresh(); message('Draw cleared. Participants and households kept; old links invalidated and registration reopened.'); }
+  finally { submit.disabled = false; }
+}); });
+$('#open-delete-all').addEventListener('click', () => { $('#delete-all-form').reset(); $('#confirm-delete-all').disabled = true; $('#delete-all-dialog').showModal(); $('#delete-all-confirmation').focus(); });
+$('#delete-all-confirmation').addEventListener('input', e => { $('#confirm-delete-all').disabled = e.target.value !== 'DELETE EVERYTHING'; });
+$('#cancel-delete-all').addEventListener('click', () => $('#delete-all-dialog').close());
+$('#delete-all-form').addEventListener('submit', e => { e.preventDefault(); action(async () => {
+  const submit = $('#confirm-delete-all'); submit.disabled = true;
+  try { await service.deleteAllEventData($('#delete-all-confirmation').value); $('#delete-all-dialog').close(); await refresh(); message('All event data deleted. Add households and invite the family to register again.'); }
+  finally { submit.disabled = false; }
 }); });
 window.addEventListener('storage', () => { if (service.isAuthenticated()) action(refresh); });
 function showLogin() {
   $('#admin-content').hidden = true; $('#session-controls').hidden = true; $('#login-section').hidden = false;
   $('#participants').replaceChildren(); $('#households').replaceChildren(); $('#reveal-links').replaceChildren();
   $('#reset-dialog').close();
+  $('#delete-all-dialog').close();
 }
 window.addEventListener('admin-auth-required', showLogin);
 $('#login-form').addEventListener('submit', e => { e.preventDefault(); action(async () => {
