@@ -51,7 +51,8 @@ try {
   commitError = { code:'PT409', message:'The family list changed. Nothing was saved.' };
   response = await invoke('generate-assignments',{}, {'X-Admin-Session':rawSession}); check(response.status === 409 && !drawn, 'stale database snapshot fails cleanly'); commitError = null;
   response = await invoke('generate-assignments',{}, {'X-Admin-Session':rawSession}); const generated = await response.json();
-  check(response.ok && Object.keys(generated).join() === 'ok', 'generation returns no assignments or tokens');
+  check(response.ok && generated.ok && !('assignments' in generated) && !('tokens' in generated), 'generation returns no assignments or tokens');
+  check(generated.emailError?.includes('Email is not configured'), 'unconfigured email reports clean error after committed draw');
   const drawCall = calls.findLast(c => c.name === 'santa_commit_draw'); check(drawCall.data.p_revision === 4 && drawCall.data.p_pairs.length === 2, 'tested algorithm submits complete revision-checked matching');
   response = await invoke('generate-assignments',{}, {'X-Admin-Session':rawSession}); check(response.status === 409, 'repeat generation refused');
   response = await invoke('issue-reveal-token',{participantId:ids[0]}, {'X-Admin-Session':rawSession}); const issued = await response.json();
@@ -78,6 +79,7 @@ try {
     await db.exec('create role anon; create role authenticated; create role service_role bypassrls;');
     const migration = await (await fetch('../supabase/migrations/20261002000100_secret_santa.sql')).text();
     await db.exec(migration); check(true,'migration executes on real PostgreSQL');
+    await db.exec(await (await fetch('../supabase/migrations/20261002000200_email_delivery.sql')).text());
     const sql = await (await fetch('./database.sql')).text(); await db.exec(sql);
     check(true,'database integration: grants, RLS, sessions, constraints, atomic draw, reset, token scope and revocation');
     await db.close();

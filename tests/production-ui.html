@@ -6,26 +6,33 @@ import { createHandler } from '../supabase/functions/_shared/handler.js';
 const output = document.querySelector('#output'); const frame = document.querySelector('#app'); const lines = [];
 const check = (condition, name) => { if (!condition) throw new Error(name); lines.push('PASS ' + name); output.textContent=lines.join('\n')+'\nRUNNING'; };
 const wait = async predicate => { for(let i=0;i<300;i++){ if(predicate())return; await new Promise(r=>setTimeout(r,20)); } throw new Error('UI timed out: '+lines.at(-1)); };
-const password = 'integration-test-only-password'; const env = name => ({ SUPABASE_URL:'https://test.supabase.co',SUPABASE_SERVICE_ROLE_KEY:'test-server-only',ADMIN_PASSWORD:password,ALLOWED_ORIGINS:location.origin })[name];
+const password = 'integration-test-only-password'; const env = name => ({ SUPABASE_URL:'https://test.supabase.co',SUPABASE_SERVICE_ROLE_KEY:'test-server-only',ADMIN_PASSWORD:password,ALLOWED_ORIGINS:location.origin,
+  RESEND_API_KEY:'re_mock_only',EMAIL_FROM:'Family <santa@example.test>',PUBLIC_SITE_URL:'https://family.example/family-secret-santa/' })[name];
+let emailRequests = []; let failBob = true;
 const db = new PGlite();
 const configURL = 'data:text/javascript,' + encodeURIComponent("export const config = {mode:'supabase',supabaseUrl:'https://test.supabase.co',publicKey:'sb_publishable_test_only'};");
 window.testBackendFetch = async (url, init) => {
   const rpcFetch = async (rpcURL, rpcInit) => {
+    if (rpcURL === 'https://api.resend.com/emails') {
+      const email = JSON.parse(rpcInit.body); emailRequests.push(email);
+      if (failBob && email.to[0] === 'bob@example.test') return Response.json({}, {status:422});
+      return Response.json({id:'mock-message-'+emailRequests.length});
+    }
     const name=rpcURL.split('/').pop(); const params=JSON.parse(rpcInit.body); const keys=Object.keys(params);
     if(!/^santa_[a-z_]+$/.test(name)||keys.some(k=>!/^p_[a-z_]+$/.test(k))) throw new Error('Unsafe test RPC');
     try {
-      const values=keys.map(k=>typeof params[k]==='object'?JSON.stringify(params[k]):params[k]);
+      const values=keys.map(k=>params[k]!==null&&typeof params[k]==='object'?(k==='p_exclude'?params[k]:JSON.stringify(params[k])):params[k]);
       const result=await db.query(`select public.${name}(${keys.map((k,i)=>`${k} => $${i+1}`).join(',')}) as result`,values);
       return Response.json(result.rows[0].result ?? null);
     } catch(error) { return Response.json({code:error.code,message:error.message},{status:400}); }
   };
   const native=new Request('https://test.supabase.co/functions/v1/test',{method:'POST',body:init.body});
   const request={method:'POST',headers:new Headers({Origin:location.origin,...init.headers}),body:native.body};
-  return createHandler(url.split('/').pop(),env,rpcFetch)(request);
+  return createHandler(url.split('/').pop(),env,rpcFetch,{pause:async()=>{}})(request);
 };
 async function page(path, hash='') {
   let html=await(await fetch('../'+path)).text();
-  const setup=`<base href="${location.origin}/"><script type="importmap">${JSON.stringify({imports:{[location.origin+'/js/config.js']:configURL}})}<\/script><script>window.fetch=(...args)=>parent.testBackendFetch(...args);<\/script>`;
+  const setup=`<base href="${location.origin}/"><script type="importmap">${JSON.stringify({imports:{[location.origin+'/js/config.js']:configURL}})}<\/script><script>window.fetch=(...args)=>parent.testBackendFetch(...args);window.confirm=()=>true;<\/script>`;
   html=html.replace('<head>','<head>'+setup);
   await new Promise(resolve=>{frame.onload=resolve;frame.srcdoc=html;});
   if(hash)frame.contentWindow.location.hash=hash;
@@ -34,6 +41,7 @@ async function page(path, hash='') {
 try {
   await db.waitReady; await db.exec('create role anon; create role authenticated; create role service_role bypassrls;');
   await db.exec(await(await fetch('../supabase/migrations/20261002000100_secret_santa.sql')).text());
+  await db.exec(await(await fetch('../supabase/migrations/20261002000200_email_delivery.sql')).text());
   let doc=await page('admin.html'); await wait(()=>!doc.querySelector('#login-section').hidden);
   check(doc.querySelector('#admin-content').hidden,'production organizer requires sign-in');
   doc.querySelector('#admin-password').value='wrong';doc.querySelector('#login-form').requestSubmit();
@@ -55,6 +63,13 @@ try {
   check(doc.querySelector('#login-section').hidden,'same-tab reload retains server session');
   doc.querySelector('#lock').click();await wait(()=>!doc.querySelector('#generate').disabled);doc.querySelector('#generate').click();await wait(()=>!doc.querySelector('#links-section').hidden);
   check(doc.querySelector('#generate').disabled,'production draw freezes Generate');
+  await wait(()=>doc.querySelector('#email-status').textContent.includes('Emails failed: 1')&&!doc.querySelector('#retry-emails').disabled);
+  check(!doc.querySelector('#retry-emails').hidden&&doc.querySelector('#email-status').textContent.includes('Emails sent: 1'),'partial email failure shown with retry control');
+  check(emailRequests.length===2&&emailRequests.every(e=>e.to.length===1&&!e.html.includes(e.to[0].startsWith('bob')?'Alice':'Bob')),'individual invitations omit the other participant name');
+  failBob=false;doc.querySelector('#retry-emails').click();await wait(()=>doc.querySelector('#email-status').textContent.includes('Emails sent: 2'));
+  check(doc.querySelector('#retry-emails').hidden&&emailRequests.length===3&&emailRequests[2].to[0]==='bob@example.test','retry UI sends only failed participant and hides button on success');
+  doc=await page('admin.html');await wait(()=>doc.querySelector('#email-status').textContent.includes('Emails sent: 2'));
+  check(emailRequests.length===3&&doc.querySelector('#generate').disabled,'refresh preserves email status without resending or redrawing');
   check([...doc.querySelectorAll('#reveal-links input')].every(input=>input.hidden&&!input.value),'delivery list contains no raw tokens before explicit issuance');
   doc.querySelector('#links-section').open=true;
   await wait(()=>doc.querySelectorAll('#reveal-links .item').length===2);

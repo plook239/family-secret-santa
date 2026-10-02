@@ -1,5 +1,6 @@
 import { service } from './service.js';
 import { $, element, action, message } from './common.js';
+let emailBusy = false;
 function button(text, handler, disabled = false, className = 'secondary') {
   const node = element('button', text, className); node.type = 'button'; node.disabled = disabled;
   node.addEventListener('click', () => action(handler)); return node;
@@ -39,6 +40,14 @@ async function refresh() {
   $('#generate').disabled = event.drawn || !event.locked || event.participants.length < 2;
   $('#open-reset').disabled = false;
   $('#draw-status').textContent = event.drawn ? 'Names drawn successfully. Everyone has one recipient from another household. The event is frozen; pairings stay hidden here.' : event.locked ? 'Registration is closed. Review your family list, then draw the names.' : 'Registration is open. Finish gathering the family, then close registration to draw.';
+  $('#email-section').hidden = service.isDemo || !event.drawn;
+  const delivery = event.emailDelivery ?? {};
+  $('#email-status').textContent = `Assignments generated successfully. Emails sent: ${delivery.sent ?? 0}. Emails failed: ${delivery.failed ?? 0}. Waiting: ${delivery.pending ?? 0}. Sending: ${delivery.sending ?? 0}. Needs review: ${delivery.uncertain ?? 0}. Manual replacements: ${delivery.cancelled ?? 0}.`;
+  $('#email-problems').replaceChildren();
+  for (const problem of delivery.problems ?? []) $('#email-problems').append(element('li', `${problem.name}: ${problem.error ?? 'Check delivery in Resend.'}`));
+  $('#retry-emails').hidden = !(delivery.failed || delivery.pending || delivery.sending);
+  $('#retry-emails').disabled = emailBusy;
+  $('#refresh-emails').disabled = emailBusy;
   $('#links-section').hidden = !event.drawn;
   $('#reveal-links').replaceChildren();
   // Tokens are delivery credentials; recipient names never enter this page.
@@ -47,7 +56,7 @@ async function refresh() {
     info.append(element('strong', link.name), element('p', link.email));
     if (!service.isDemo) {
       const create = button(link.linkIssued ? 'Replace reveal link' : 'Create reveal link', async () => {
-        if (link.linkIssued && !window.confirm(`Replace ${link.name}’s reveal link? Their old link will stop working.`)) return;
+        if (link.linkIssued && !window.confirm(`Replace ${link.name}’s reveal link? Their old link, including the emailed invitation, will stop working. Any unsent invitation will be cancelled.`)) return;
         create.disabled = true;
         try {
           const { token } = await service.issueRevealLink(link.participantId);
@@ -85,9 +94,31 @@ $('#lock').addEventListener('click', () => action(async () => {
 }));
 $('#generate').addEventListener('click', () => action(async () => {
   $('#generate').disabled = true;
-  try { await change(() => service.generate(), 'The names are drawn! Open Personal reveal links below to share each person’s secret.'); }
+  emailBusy = true;
+  try {
+    message(service.isDemo ? 'Drawing the names…' : 'Drawing the names and sending private invitations…');
+    await finishEmailBatches(await service.generate());
+  }
   catch (error) { await refresh(); throw error; }
+  finally { emailBusy = false; await refresh(); }
 }));
+async function finishEmailBatches(result) {
+  // Bounded backend batches preserve progress across reloads. Stop on provider failures.
+  for (let batch = 0; batch < 20 && result?.emailDelivery?.pending > 0 && !result.emailError; batch++) {
+    await refresh();
+    result = await service.retryFailedEmails();
+  }
+  await refresh();
+  message(result?.emailError ?? (service.isDemo ? 'The names are drawn! Share the personal reveal links below.' : 'Assignments generated successfully. Email delivery status is shown below.'), !!result?.emailError);
+}
+$('#retry-emails').addEventListener('click', () => action(async () => {
+  if (emailBusy) return;
+  emailBusy = true; $('#retry-emails').disabled = true;
+  message('Sending unsent private invitations. Your assignments stay the same…');
+  try { await finishEmailBatches(await service.retryFailedEmails()); }
+  finally { emailBusy = false; await refresh(); }
+}));
+$('#refresh-emails').addEventListener('click', () => action(refresh));
 $('#open-reset').addEventListener('click', () => { $('#reset-form').reset(); $('#reset-dialog').showModal(); $('#reset-confirmation').focus(); });
 $('#cancel-reset').addEventListener('click', () => $('#reset-dialog').close());
 $('#reset-form').addEventListener('submit', e => { e.preventDefault(); action(async () => {

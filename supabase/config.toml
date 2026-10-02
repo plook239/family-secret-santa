@@ -49,3 +49,5 @@ verify_jwt = false
 verify_jwt = false
 [functions.reset-event]
 verify_jwt = false
+[functions.retry-failed-emails]
+verify_jwt = false

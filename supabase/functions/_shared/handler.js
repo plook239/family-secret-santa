@@ -1,8 +1,9 @@
 import { solveAssignments } from './assignment.js';
+import { deliverEmails } from './email.js';
 import { ApiError, hash, passwordMatches, randomToken, readBody, sessionHash, strongToken, text, uuid } from './security.js';
 
 const publicOperations = new Set(['public-event', 'register-participant', 'admin-login', 'reveal-assignment']);
-export function createHandler(operation, env, fetchApi = fetch) {
+export function createHandler(operation, env, fetchApi = fetch, emailOptions = {}) {
   async function rpc(name, parameters = {}) {
     const url = env('SUPABASE_URL'); const key = env('SUPABASE_SERVICE_ROLE_KEY');
     if (!url || !key) throw new ApiError('Server database configuration is missing.', 503);
@@ -80,7 +81,19 @@ export function createHandler(operation, env, fetchApi = fetch) {
           try { pairs = solveAssignments(event.participants, () => crypto.getRandomValues(new Uint32Array(1))[0] / 4294967296); }
           catch (error) { throw new ApiError(error.message, 409); }
           await rpc('santa_commit_draw', { p_session_hash: adminHash, p_revision: event.revision, p_pairs: pairs });
-          return response({ ok: true });
+          // The draw transaction has committed. Email failures must never undo it.
+          try {
+            return response({ ok:true, ...await deliverEmails((name, data = {}) => rpc(name, { p_session_hash:adminHash, ...data }), env, fetchApi, emailOptions) });
+          } catch {
+            return response({ ok:true, emailError:'Assignments generated successfully. Email delivery was interrupted; refresh for its saved status and retry unsent emails.' });
+          }
+        }
+        case 'retry-failed-emails': {
+          const event = await rpc('santa_admin_data', { p_session_hash:adminHash });
+          if (!event.drawn) throw new ApiError('Generate the assignments before retrying emails.', 409);
+          try {
+            return response({ ok:true, ...await deliverEmails((name, data = {}) => rpc(name, { p_session_hash:adminHash, ...data }), env, fetchApi, emailOptions) });
+          } catch { return response({ ok:true, emailError:'Email delivery was interrupted. Refresh for its saved status; assignments are unchanged.' }); }
         }
         case 'issue-reveal-token': {
           const id = uuid(body.participantId);

@@ -60,6 +60,7 @@ export function createSupabaseService(config, { fetchApi = fetch, sessionStore =
     removeParticipant: id => call('remove-participant', { id }, true),
     setLocked: locked => call('set-registration', { locked }, true),
     generate: () => call('generate-assignments', {}, true),
+    retryFailedEmails: () => call('retry-failed-emails', {}, true),
     reset: confirmation => call('reset-event', { confirmation }, true),
     reveal: token => call('reveal-assignment', { token }),
     async getRevealLinks() {
